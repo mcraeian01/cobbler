@@ -40,6 +40,20 @@ This repo is the **template**: the engine, prompts and rules. Your clone is an *
 4. Each woken **topic agent** runs in its own sandbox. It sees its topic folder (read-write) and `_global/` (read-only), nothing else. A hard turn ceiling stops runaway runs.
 5. The runner records what each run actually used, updates `_orchestrator/USAGE.md`, and pushes the digest to your phone.
 
+## Why Claude Code
+You could get part of the way with scheduled tasks in Claude Desktop: one task per project, plus an orchestrator task that writes a plan the others read. Cobbler uses Claude Code in headless mode instead, because the parts that make it trustworthy overnight have to be **code, not prompts**:
+
+- **Limits are enforced, not requested.** The runner, plain Python, starts every run. It sets a hard turn ceiling, rejects plans that name unknown topics or blow the budget, and drops any grant over the cycle's spend cap. A prompt can only ask a model to stay within budget at 4:40am.
+- **Usage is measured, not self-reported.** Each headless run returns its actual turn count and an estimated cost, and the ledger is built from those numbers. In testing, an agent logged "about 9 turns" for a run the runner measured at 16; a ledger built on self-reports would drift.
+- **Isolation is a wall, not an instruction.** Each agent runs in a bubblewrap sandbox that can see only its own topic folder and the shared rules. It cannot see other topics, the rest of your files or your credentials. That matters, because agents read web pages that may try to steer them.
+- **Keys stay out of the agent's reach.** Some steps shouldn't involve a model at all. The paper-trading broker is a plain script outside the sandbox: it holds the API keys, checks each order against the charter's limits, and only then places it. The agent only writes an orders file. Without code between the agents, the agent would have to hold the keys itself.
+- **Every run starts fresh, with only what it needs.** The orchestrator and each agent are separate sessions that hand over through files. Nothing piles up in one long conversation, so there's no mixing of projects and no lossy compacting. Each role can use a different model: a cheaper one for allocation, a stronger one for the work.
+- **Structured hand-offs.** The orchestrator must return its plan in a fixed JSON schema, which the runner checks before anything wakes.
+- **APIs over clicking.** Anything with an API (a broker, a data source) is called directly, and the result can be checked. Cobbler deliberately avoids computer use. Clicking around a screen unattended is fragile, and anything planted on a page could steer an agent that can reach your whole desktop.
+- **Your subscription, not an API bill.** Headless Claude Code runs on a Pro or Max plan's usage, using a long-lived token from `claude setup-token`. The weekly cycle exists to spend allowance that would otherwise expire at your reset.
+
+**Where Claude Desktop is still better:** no setup, built-in connectors (mail, calendar, drive) and computer use. The two work side by side: a Desktop task can drop a file into a topic's folder, and that topic's agent picks it up on its next wake. Keep the rule-bound overnight work in the runner.
+
 ## Topics that trade
 A topic listed under `[brokers.<slug>]` in `config.toml` gets an Alpaca **paper** account, run by `bin/broker.py` outside the sandbox. Before the agent runs, the runner writes `BROKER.md` into the topic: account value, positions, fills, value against SPY. After the run, it reads the agent's `orders.json`, checks each order against the limits in `config.toml` (probe and position size, a thesis ID and reason on every order), places the ones that pass, and reports every verdict in `BROKER.md` and the digest.
 
