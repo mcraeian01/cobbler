@@ -1,0 +1,68 @@
+# Copy to config.toml (setup.sh does this). Set weekly_reset_* from Claude Settings → Usage.
+# Runner configuration. Numbers here are enforced by bin/cycle.py.
+# POLICY.md holds the priorities and judgement calls; this file holds the hard limits.
+
+[workspace]
+owner = ""                    # your first name; agents and the orchestrator use it (setup.sh asks)
+root = ""                    # empty = the folder this file is in
+git_commit = false           # commit after each cycle (needs `git init` in root)
+git_push = false
+
+[runner]
+state_dir = "~/.local/state/agent-runner"   # runs.jsonl, per-run Claude config, lock. Outside the vault.
+isolation = "bwrap"          # "bwrap" (sandbox each run) or "none" (testing only)
+orchestrator_max_turns = 60
+turn_ceiling_buffer = 10     # hard ceiling = tier turns + this; agents aim to stop at their tier turns
+run_timeout_minutes = 45
+wake_message_max_words = 80
+
+[models]
+orchestrator = "sonnet"      # allocation is bookkeeping; a cheaper model saves budget
+agent = "opus"
+
+[budget]
+weekly_credits = 20
+orchestrator_credits = 1
+max_agents_per_cycle = 3
+weekly_reset_weekday = 3     # 0 = Monday. Read yours from Settings → Usage.
+weekly_reset_time = "10:00"  # local time of the weekly reset
+
+[schedule]
+# Must match deploy/agents-daily.timer and agents-weekly.timer (local time).
+# The runner uses it to count cycles left before the weekly reset and cap each cycle's spend.
+daily_time = "04:40"
+weekly_weekday = 2           # 0 = Monday. The day before the reset.
+weekly_time = "20:10"
+
+[tiers.S]
+credits = 1
+turns = 15
+
+[tiers.M]
+credits = 2
+turns = 35
+
+[tiers.L]
+credits = 4
+turns = 80
+
+[agents]
+# Agents can read, write and research the web inside their sandbox, with no general shell.
+# The OAuth token is in every run's environment, and agents read untrusted web pages. So:
+# - no python3 or git: both run arbitrary commands (git via `-c alias.x='!cmd'`) that could send the token out
+# - no reading /proc: /proc/self/environ holds the token, and WebFetch could carry it off
+allowed_tools = "Read,Glob,Grep,Edit,Write,WebSearch,WebFetch,Bash(ls *),Bash(mkdir *)"
+disallowed_tools = "Agent,Read(//proc/**),Grep(//proc/**),Glob(//proc/**)"
+
+[notify]
+# ntfy topic URL for the digest, e.g. "https://ntfy.sh/my-agents-7f3k". Leave empty to print instead.
+# A private topic name is the password; or self-host ntfy and set NTFY_TOKEN in the env file.
+ntfy_url = ""                # set NTFY_URL in the env file instead (keeps the topic out of git)
+
+# Optional: give a topic an Alpaca *paper* trading account (see "Topics that trade" in README.md).
+# Add ALPACA_KEY_ID and ALPACA_SECRET_KEY (paper keys) to the env file. They never enter the sandbox.
+# [brokers.investor]
+# provider = "alpaca-paper"
+# enabled = true
+# probe_max_pct = 5          # a new position, at most this % of account value
+# position_max_pct = 25      # any position after an add, at most this %

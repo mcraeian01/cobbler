@@ -1,0 +1,12 @@
+# Template: setup.sh fills in the day and time from [schedule] in config.toml (local time).
+# Runs the evening before the weekly usage reset, to spend credits that would otherwise expire.
+[Unit]
+Description=Cobbler use-it-or-lose-it cycle, before the weekly reset
+
+[Timer]
+OnCalendar=@WEEKLY_DAY@ *-*-* @WEEKLY_TIME@:00
+Persistent=false
+Unit=agents-cycle@weekly.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+# Template: setup.sh fills in the time from [schedule] in config.toml (local time).
+[Unit]
+Description=Cobbler daily cycle, early morning
+
+[Timer]
+OnCalendar=*-*-* @DAILY_TIME@:00
+RandomizedDelaySec=10m
+Persistent=false
+Unit=agents-cycle@daily.service
+
+[Install]
+WantedBy=timers.target

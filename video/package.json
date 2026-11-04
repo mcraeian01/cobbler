@@ -1,0 +1,19 @@
+{
+  "name": "cobbler-explainer",
+  "private": true,
+  "description": "Cobbler explainer video, built with Remotion",
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render Explainer out/cobbler-explainer.mp4",
+    "still": "remotion still Explainer out/still.png"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.540",
+    "@remotion/google-fonts": "4.0.540",
+    "@types/react": "18.3.12",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.540",
+    "typescript": "7.0.2"
+  }
+}
