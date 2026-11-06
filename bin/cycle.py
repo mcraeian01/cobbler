@@ -36,6 +36,7 @@ CONFIG_PATH = Path(os.environ.get("AGENTS_CONFIG", HERE.parent / "config.toml"))
 sys.path.insert(0, str(HERE))
 import broker  # noqa: E402  (bin/broker.py: paper-trading step for topics listed under [brokers])
 import books  # noqa: E402  (bin/books.py: simulated books, one per thesis, for topics under [books])
+import publish  # noqa: E402  (bin/publish.py: public, timestamped record for topics under [publish])
 
 RUN_ENV = {"PATH", "LANG", "TERM", "TZ", "HOME", "CLAUDE_CODE_OAUTH_TOKEN"}
 
@@ -492,6 +493,13 @@ def main() -> None:
         if rec["outcome"] == "usage_limited":
             notes.append("usage limit reached; remaining wakes skipped")
             break
+
+    # Publish after the agents, so a book accepted tonight is public and timestamped before it fills.
+    for slug in ([] if a.dry_run else cfg.get("publish", {})):
+        try:
+            book_notes += [f"{slug} {line}" for line in publish.publish(cfg, slug)]
+        except Exception as e:
+            book_notes.append(f"{slug} publish failed: {e}")
 
     runs = read_runs(cfg)
     if not a.dry_run:

@@ -22,6 +22,7 @@ Thesis first, portfolio second. This is the core of the topic.
 - **Limits the runner enforces** (see `BOOKS.md` for the current numbers): at most 20 open books and 3 new books in any 7 days; one company at most 20% of a book (ETFs and baskets can go to 100%); options bought only, at most 20% each and 50% in total; long weights at most 100% (no margin); shorts at most 50%. A spec that breaks a limit is rejected, with the reason in `BOOKS.md`.
 - **No look-ahead.** A spec fills at the open of the first trading session after you write it. Never try to time or back-date a fill.
 - Nothing here is investment advice to the owner. Don't write it as if it were.
+- **`THESES.md`, `BOOKS.md` and `books/` may be published to a public repo** after each cycle, timestamped, and never deleted. Write them for strangers to read: no personal details, nothing about the owner, nothing you'd regret being public. Everything else in this folder stays private.
 
 ## Allowed sources and tools
 - Web search and fetching public pages: company filings (SEC EDGAR), earnings releases and transcripts, central bank and government data (FRED, BLS, Fed), reputable financial press, public quote pages.

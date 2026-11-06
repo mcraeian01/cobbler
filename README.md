@@ -75,6 +75,15 @@ A topic listed under `[books.<slug>]` in `config.toml` runs many simulated **boo
 - Change a book by editing its spec; set `"status": "close"` to sell it out. A closed book stays closed; a new idea gets a new ID.
 - Tests: `python3 tests/test_books.py`.
 
+## Public record
+A topic listed under `[publish.<slug>]` has chosen files (for the investor: `THESES.md`, `BOOKS.md`, `books/*.json`) pushed to a public GitHub repo after every cycle by `bin/publish.py`. That makes a claim like "this thesis was written before the book bet on it" checkable by anyone:
+
+- **Timestamped.** Each publish adds a manifest of every file's SHA-256, stamped with [OpenTimestamps](https://opentimestamps.org), which anchors it in the Bitcoin blockchain. Pending stamps are upgraded to full Bitcoin proofs on later cycles. GitHub's record of push times is a second witness.
+- **Append only.** A file removed from the topic stays published; losing books stay visible.
+- **Safe to automate.** Only the listed files go out. Nothing is published if a file contains a secret from the env file, a token or key pattern, a home path or the machine's hostname. The push uses a deploy key that can write to that one repo, kept with the runner, outside every sandbox.
+- **Order of events.** Publishing runs after the night's agents, so a book accepted tonight is public and stamped hours before it fills at the next open.
+- **Setup:** `bin/publish-setup.sh <owner>/<repo>` creates the public repo, the deploy key and a pinned GitHub host key. Run it yourself: it makes something public. Tests: `python3 tests/test_publish.py`.
+
 ## Topics that trade
 A topic listed under `[brokers.<slug>]` in `config.toml` gets an Alpaca **paper** account, run by `bin/broker.py` outside the sandbox. Before the agent runs, the runner writes `BROKER.md` into the topic: account value, positions, fills, value against SPY. After the run, it reads the agent's `orders.json`, checks each order against the limits in `config.toml` (probe and position size, a thesis ID and reason on every order), places the ones that pass, and reports every verdict in `BROKER.md` and the digest.
 
@@ -88,7 +97,8 @@ By hand: `bin/broker.py <slug> --snapshot`, `--check` (validate `orders.json`, p
 bin/cycle.py               the runner
 bin/broker.py              paper-trading step for topics under [brokers] (keys stay outside the sandbox)
 bin/books.py               simulated books for topics under [books], priced from real market data
-tests/                     python3 tests/test_books.py, python3 tests/test_broker.py
+bin/publish.py             public, timestamped record for topics under [publish]; bin/publish-setup.sh sets it up
+tests/                     python3 tests/test_books.py, tests/test_broker.py, tests/test_publish.py
 config.toml                hard limits: pool, tiers, models, schedule (from config.example.toml)
 deploy/                    systemd unit templates and env template, installed by setup.sh
 setup.sh                   checks prerequisites, writes the private env file, installs the timers
