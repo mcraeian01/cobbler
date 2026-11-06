@@ -35,6 +35,7 @@ HERE = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("AGENTS_CONFIG", HERE.parent / "config.toml"))
 sys.path.insert(0, str(HERE))
 import broker  # noqa: E402  (bin/broker.py: paper-trading step for topics listed under [brokers])
+import books  # noqa: E402  (bin/books.py: simulated books, one per thesis, for topics under [books])
 
 RUN_ENV = {"PATH", "LANG", "TERM", "TZ", "HOME", "CLAUDE_CODE_OAUTH_TOKEN"}
 
@@ -355,6 +356,7 @@ def wake(cfg: dict, w: dict, dry: bool) -> dict:
     prompt = prompt.replace("{{TOPIC}}", slug).replace("{{GLOBAL}}", global_path).replace("{{OWNER}}", owner(cfg))
     prompt += "\n\n" + w["message"].strip()
     trades = slug in cfg.get("brokers", {}) and not dry
+    has_books = slug in cfg.get("books", {}) and not dry
     broker_notes = []
     if trades:  # fresh account view for the agent; a broker outage never blocks the run
         try:
@@ -370,6 +372,12 @@ def wake(cfg: dict, w: dict, dry: bool) -> dict:
         chdir_real=root / "topics" / slug, chdir_box="/work/topic", schema=None, dry=dry,
     )
     out = outcome_of(res)
+    if has_books:  # check the agent's book specs, queue changes, refresh BOOKS.md
+        try:
+            broker_notes += books.accept(cfg, slug)
+            broker_notes += books.update(cfg, slug)
+        except Exception as e:
+            broker_notes.append(f"books failed, nothing queued: {e}")
     if trades:  # place what the agent asked for, checked against config.toml, then refresh
         try:
             broker_notes += broker.execute(cfg, slug)
@@ -453,6 +461,14 @@ def main() -> None:
         sys.exit("another cycle is running")
 
     runs = read_runs(cfg)
+    # Books move with the market every cycle, whether or not their topic is woken:
+    # queued changes fill, kill rules are checked, BOOKS.md is refreshed before anyone reads it.
+    book_notes = []
+    for slug in ([] if a.dry_run else cfg.get("books", {})):
+        try:
+            book_notes += [f"{slug} {line}" for line in books.update(cfg, slug)]
+        except Exception as e:
+            book_notes.append(f"{slug} books: update failed: {e}")
     cap = None if a.only else agent_spend_cap(cfg, runs, a.mode)  # before the orchestrator's own charge
     if a.only:
         plan = {"wakes": [{"topic": a.only, "tier": a.tier, "reason": "selected",
@@ -484,6 +500,7 @@ def main() -> None:
         f"- {r['topic']} {r['tier']}: {r['outcome']}, {r.get('num_turns')}/{r.get('cap')} turns"
         for r in results] if results else ["", "No agents woken."]
     footer += [f"- {r['topic']} broker: {line}" for r in results for line in r.get("broker", [])]
+    footer += [f"- {n}" for n in book_notes]
     footer += [f"- note: {n}" for n in notes]
     notify(cfg, f"Agents · {now():%a %d %b}", plan["digest"].strip() + "\n" + "\n".join(footer), a.dry_run)
     maybe_commit(cfg, f"cycle {now():%Y-%m-%d %H:%M} ({a.mode})", a.dry_run)

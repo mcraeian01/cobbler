@@ -66,3 +66,17 @@ ntfy_url = ""                # set NTFY_URL in the env file instead (keeps the t
 # enabled = true
 # probe_max_pct = 5          # a new position, at most this % of account value
 # position_max_pct = 25      # any position after an add, at most this %
+
+# Optional: simulated books for a topic (see "Books" in README.md). Each thesis gets its own book,
+# priced from real market data; nothing is ordered anywhere, so any number can run. Uses the same
+# ALPACA_KEY_ID / ALPACA_SECRET_KEY (paper keys) for prices. Don't list a topic under both.
+# [books.investor]
+# start_cash = 1000000       # every book starts at this value
+# max_books = 20             # open at once
+# max_new_per_week = 3       # new books in any 7 days
+# max_single_stock = 0.20    # one company, as a fraction of a book (ETFs and baskets may go to 100%)
+# max_option_each = 0.20     # one option contract series (premium paid)
+# max_options_total = 0.50
+# max_long = 1.0             # no margin
+# max_short = 0.50
+# slippage_bps = 5

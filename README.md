@@ -54,6 +54,27 @@ You could get part of the way with scheduled tasks in Claude Desktop: one task p
 
 **Where Claude Desktop is still better:** no setup, built-in connectors (mail, calendar, drive) and computer use. The two work side by side: a Desktop task can drop a file into a topic's folder, and that topic's agent picks it up on its next wake. Keep the rule-bound overnight work in the runner.
 
+## Books: one simulated portfolio per thesis
+A topic listed under `[books.<slug>]` in `config.toml` runs many simulated **books**, one per thesis, each starting at the same size (default $1M). The agent writes a short spec per book in `topics/<slug>/books/<ID>.json`; `bin/books.py`, plain code outside the sandbox, runs them:
+
+```json
+{"id": "B001", "thesis": "T1", "status": "active",
+ "targets": [{"symbol": "IEI", "kind": "etf", "weight": 0.5},
+             {"symbol": "TLT", "kind": "etf", "weight": 0.3},
+             {"symbol": "TLT271217C00095000", "kind": "option", "weight": 0.15}],
+ "kill": [{"if": "nav_below", "value": 0.75},
+          {"if": "close_below", "symbol": "TLT", "value": 82},
+          {"if": "after", "value": "2027-11-05"}]}
+```
+
+- **Fills:** a new or changed spec fills at the **open of the first trading session after it was written**, at real prices from Alpaca's market data, plus slippage. Nothing is back-dated and no orders are placed, so the number of books isn't limited by an account's size.
+- **Kill rules** are checked on every session's close: value below a fraction of the start, a symbol closing above or below a level, or an end date. A hit sells the whole book at the next open, mechanically, even on nights the agent isn't woken.
+- **Limits** from `config.toml`: open books and new books per week; one company at most 20% of a book (ETFs and baskets can go to 100%); options bought only, at most 20% each and 50% in total; longs at most 100% (no margin); shorts at most 50%.
+- **`BOOKS.md`** in the topic, refreshed every cycle: every book's value, return, SPY over the same period, positions, kill rules, events, and the verdict on each spec.
+- Options settle at intrinsic value after expiry. Dividends, splits and borrow fees aren't modelled.
+- Change a book by editing its spec; set `"status": "close"` to sell it out. A closed book stays closed; a new idea gets a new ID.
+- Tests: `python3 tests/test_books.py`.
+
 ## Topics that trade
 A topic listed under `[brokers.<slug>]` in `config.toml` gets an Alpaca **paper** account, run by `bin/broker.py` outside the sandbox. Before the agent runs, the runner writes `BROKER.md` into the topic: account value, positions, fills, value against SPY. After the run, it reads the agent's `orders.json`, checks each order against the limits in `config.toml` (probe and position size, a thesis ID and reason on every order), places the ones that pass, and reports every verdict in `BROKER.md` and the digest.
 
@@ -66,6 +87,8 @@ By hand: `bin/broker.py <slug> --snapshot`, `--check` (validate `orders.json`, p
 ```
 bin/cycle.py               the runner
 bin/broker.py              paper-trading step for topics under [brokers] (keys stay outside the sandbox)
+bin/books.py               simulated books for topics under [books], priced from real market data
+tests/                     python3 tests/test_books.py, python3 tests/test_broker.py
 config.toml                hard limits: pool, tiers, models, schedule (from config.example.toml)
 deploy/                    systemd unit templates and env template, installed by setup.sh
 setup.sh                   checks prerequisites, writes the private env file, installs the timers
@@ -104,6 +127,8 @@ new-topic.sh               seeds a topic
 | `STATE.md` → rest, `LOG.md`, `PITCH.md`, `outputs/` | reads | reads | writes |
 | `BROKER.md` (trading topics) | reads | reads | reads; written by the runner |
 | `orders.json` (trading topics) | reads | reads | writes; placed and cleared by the runner |
+| `books/<ID>.json` (book topics) | reads | reads | writes |
+| `BOOKS.md` (book topics) | reads | reads | reads; written by the runner |
 
 ## Common actions
 - **Add a topic:** `./new-topic.sh <slug> "<Title>"`, fill in its CHARTER.md, set its priority in POLICY.md. The next cycle picks it up.
