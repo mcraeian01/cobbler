@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 *.bak
+# Claude Code worktrees of this repo, created by other sessions
+.claude/worktrees/
