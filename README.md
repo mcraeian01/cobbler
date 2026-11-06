@@ -75,14 +75,18 @@ A topic listed under `[books.<slug>]` in `config.toml` runs many simulated **boo
 - Change a book by editing its spec; set `"status": "close"` to sell it out. A closed book stays closed; a new idea gets a new ID.
 - Tests: `python3 tests/test_books.py`.
 
-## Public record
-A topic listed under `[publish.<slug>]` has chosen files (for the investor: `THESES.md`, `BOOKS.md`, `books/*.json`) pushed to a public GitHub repo after every cycle by `bin/publish.py`. That makes a claim like "this thesis was written before the book bet on it" checkable by anyone:
+## Timestamped record
+A thesis is only convincing if you can prove it was written before the money went in. Cobbler can timestamp a topic's chosen files with [OpenTimestamps](https://opentimestamps.org), which anchors a fingerprint in the Bitcoin blockchain, in one of two ways. Both run after the night's agents, so a book accepted tonight is stamped hours before it fills.
 
-- **Timestamped.** Each publish adds a manifest of every file's SHA-256, stamped with [OpenTimestamps](https://opentimestamps.org), which anchors it in the Bitcoin blockchain. Pending stamps are upgraded to full Bitcoin proofs on later cycles. GitHub's record of push times is a second witness.
-- **Append only.** A file removed from the topic stays published; losing books stay visible.
-- **Safe to automate.** Only the listed files go out. Nothing is published if a file contains a secret from the env file, a token or key pattern, a home path or the machine's hostname. The push uses a deploy key that can write to that one repo, kept with the runner, outside every sandbox.
-- **Order of events.** Publishing runs after the night's agents, so a book accepted tonight is public and stamped hours before it fills at the next open.
-- **Setup:** `bin/publish-setup.sh <owner>/<repo>` creates the public repo, the deploy key and a pinned GitHub host key. Run it yourself: it makes something public. Tests: `python3 tests/test_publish.py`.
+**Sealed, private (recommended): `[seal.<slug>]`, `bin/seal.py`.**
+- Every cycle the runner fingerprints each item (each thesis in `THESES.md` separately, each `books/*.json`), keeps every version in `_records/<slug>/`, and stamps the full list. Nothing is published.
+- Later, `bin/seal.py <slug> --reveal B007` builds a folder to share: that book's spec and its thesis exactly as first sealed, the stamped lists proving they existed before the book filled, and how to check them. The lists also carry every other item's fingerprint, so the size of the field is provable without revealing any other thesis.
+- Items are never dropped from the list, so the field can't be shrunk after the fact.
+- For the split to work, each thesis heading must start with its ID: `### T3 · Oil producers re-rate`.
+
+**Public: `[publish.<slug>]`, `bin/publish.py`.** Pushes the chosen files to a public GitHub repo after every cycle, append-only, with stamped manifests. Nothing goes out if a file contains a secret from the env file, a token or key, a home path or the hostname. The push uses a deploy key for that one repo. One-time setup, by you: `bin/publish-setup.sh <owner>/<repo>`.
+
+Tests: `python3 tests/test_seal.py`, `python3 tests/test_publish.py, tests/test_seal.py`.
 
 ## Topics that trade
 A topic listed under `[brokers.<slug>]` in `config.toml` gets an Alpaca **paper** account, run by `bin/broker.py` outside the sandbox. Before the agent runs, the runner writes `BROKER.md` into the topic: account value, positions, fills, value against SPY. After the run, it reads the agent's `orders.json`, checks each order against the limits in `config.toml` (probe and position size, a thesis ID and reason on every order), places the ones that pass, and reports every verdict in `BROKER.md` and the digest.
@@ -97,6 +101,7 @@ By hand: `bin/broker.py <slug> --snapshot`, `--check` (validate `orders.json`, p
 bin/cycle.py               the runner
 bin/broker.py              paper-trading step for topics under [brokers] (keys stay outside the sandbox)
 bin/books.py               simulated books for topics under [books], priced from real market data
+bin/seal.py                private, timestamped record for topics under [seal], with selective reveal
 bin/publish.py             public, timestamped record for topics under [publish]; bin/publish-setup.sh sets it up
 tests/                     python3 tests/test_books.py, tests/test_broker.py, tests/test_publish.py
 config.toml                hard limits: pool, tiers, models, schedule (from config.example.toml)

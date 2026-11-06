@@ -81,6 +81,12 @@ ntfy_url = ""                # set NTFY_URL in the env file instead (keeps the t
 # max_short = 0.50
 # slippage_bps = 5
 
+# Optional: seal a topic's record privately: fingerprint and OpenTimestamps-stamp its chosen files
+# every cycle, keep every version in _records/<topic>/, publish nothing. Reveal one book later with
+# bin/seal.py <topic> --reveal B007 (see "Timestamped record" in README.md). Recommended over [publish].
+# [seal.investor]
+# files = ["THESES.md", "books/*.json"]   # THESES.md is split so each thesis is sealed on its own
+
 # Optional: publish a topic's record to a public GitHub repo after each cycle, with an OpenTimestamps
 # proof of every file (see "Public record" in README.md). Run bin/publish-setup.sh <owner>/<repo> once.
 # Needs the OpenTimestamps client: pip install opentimestamps-client (or set ots = "" to skip stamps).
