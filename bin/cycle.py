@@ -23,6 +23,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -268,12 +269,16 @@ def outcome_of(res: dict) -> str:
     if res.get("dry_run"):
         return "dry_run"
     sub = res.get("subtype", "")
-    text = str(res.get("result", "")).lower()
     if "max_turns" in sub:
         return "hit_ceiling"
-    if "limit" in text and ("usage" in text or "rate" in text or "reset" in text):
+    if not res.get("is_error"):
+        return "ok"   # a finished run's text is the agent's own words ("limit order", "Fed rate"), not a status
+    if sub in ("timeout", "bad_output"):
+        return sub
+    text = str(res.get("result", "")).lower()
+    if re.search(r"usage limit|rate limit|limit reached|out of (extra )?usage|\b429\b", text):
         return "usage_limited"
-    return "error" if res.get("is_error") else "ok"
+    return "error"
 
 
 # ---------- the two kinds of run ----------
