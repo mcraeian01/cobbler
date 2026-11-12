@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
 *.bak
+share/*.mp4
 # Claude Code worktrees of this repo, created by other sessions
 .claude/worktrees/

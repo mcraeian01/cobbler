@@ -32,6 +32,7 @@ This repo is the **template**: the engine, prompts and rules. Your clone is an *
 - **Never push to `template`.** You don't have write access anyway. To back up your instance, add a remote of your own that is **private**, e.g. `git remote add backup git@github.com:<you>/cobbler-mine.git`, and push there.
 - **Secrets never touch git:** the token, ntfy topic and any broker keys live in `~/.config/agent-runner/env`.
 - **Improving the engine:** make the change in a separate clone of the template and open a pull request, so none of your instance's history comes along.
+- **Or keep your own public copy:** work in your instance and release engine changes to a public repo now and then with `bin/release.py`. It copies only an allow-list of engine files, blanks the seed files, and refuses if anything matches your private register (`private.toml`: names, accounts, machines, private projects) or a real secret, a home path or the hostname. It commits with `--commit` and pushes only with `--push`.
 
 ## How a cycle works
 1. A systemd timer starts `bin/cycle.py`.
@@ -67,9 +68,10 @@ A topic listed under `[books.<slug>]` in `config.toml` runs many simulated **boo
           {"if": "after", "value": "2027-11-05"}]}
 ```
 
-- **Fills:** a new or changed spec fills at the **open of the first trading session after it was written**, at real prices from Alpaca's market data, plus slippage. Nothing is back-dated and no orders are placed, so the number of books isn't limited by an account's size.
+- **Fills:** a new or changed spec fills at the **open of the first trading session after it was written**, at real prices from Alpaca's market data, plus slippage. Nothing is back-dated and no orders are placed, so the number of books isn't limited by an account's size. Each leg fills on its own, at the open of the first such session in which it traded: a thinly traded option doesn't hold the rest of the book back, and a buy leg with no trade in 5 sessions is dropped (its weight stays in cash). Option contracts are checked when a spec arrives: one that doesn't exist is rejected, and a thin one is accepted with a warning.
 - **Kill rules** are checked on every session's close: value below a fraction of the start, a symbol closing above or below a level, or an end date. A hit sells the whole book at the next open, mechanically, even on nights the agent isn't woken.
-- **Limits** from `config.toml`: open books and new books per week; one company at most 20% of a book (ETFs and baskets can go to 100%); options bought only, at most 20% each and 50% in total; longs at most 100% (no margin); shorts at most 50%.
+- **Limits** from `config.toml`: open books, and the pace of new books (a weekly limit, with an optional daily ramp until a set number have opened); one company at most 20% of a book (ETFs and baskets can go to 100%); options bought only, at most 20% each and 50% in total; longs at most 100% (no margin); shorts at most 50%.
+- **Held at Alpaca (`mode = "alpaca"`):** each book gets its own Alpaca paper account from a private accounts file, never reused. The runner turns the spec into real orders on that account (market orders for stocks and ETFs, limit orders at the quote for options) before the open, reads positions and value back from Alpaca every cycle, re-sends legs that didn't fill, and sells out when a kill rule fires. The orders, fills and values are then Alpaca's records, not ours. Alpaca allows 3 paper accounts per login, so plan on more logins as books grow. `bin/accounts.py plan N` reserves the next N accounts across logins and prints a checklist for Alpaca's dashboard (sign-ups, accounts and keys can't be created by API); `bin/accounts.py check` tests each account's keys, number, balance and options level, and only accounts that pass are used. A private register (`_private/ACCOUNTS.md`, never released) shows every account, its login, and the book and thesis it holds. Without it (`mode = "sim"`) books are simulated here at real prices.
 - **`BOOKS.md`** in the topic, refreshed every cycle: every book's value, return, SPY over the same period, positions, kill rules, events, and the verdict on each spec.
 - Options settle at intrinsic value after expiry. Dividends, splits and borrow fees aren't modelled.
 - Change a book by editing its spec; set `"status": "close"` to sell it out. A closed book stays closed; a new idea gets a new ID.
@@ -79,10 +81,10 @@ A topic listed under `[books.<slug>]` in `config.toml` runs many simulated **boo
 A thesis is only convincing if you can prove it was written before the money went in. Cobbler can timestamp a topic's chosen files with [OpenTimestamps](https://opentimestamps.org), which anchors a fingerprint in the Bitcoin blockchain, in one of two ways. Both run after the night's agents, so a book accepted tonight is stamped hours before it fills.
 
 **Sealed, private (recommended): `[seal.<slug>]`, `bin/seal.py`.**
-- Every cycle the runner fingerprints each item (each thesis in `THESES.md` separately, each `books/*.json`), keeps every version in `_records/<slug>/`, and stamps the full list. Nothing is published.
+- Every cycle the runner fingerprints each item (each `theses/<ID>.md`, or each thesis section of a single `THESES.md`, and each `books/*.json`), keeps every version in `_records/<slug>/`, and stamps the full list. Nothing is published.
 - Later, `bin/seal.py <slug> --reveal B007` builds a folder to share: that book's spec and its thesis exactly as first sealed, the stamped lists proving they existed before the book filled, and how to check them. The lists also carry every other item's fingerprint, so the size of the field is provable without revealing any other thesis.
 - Items are never dropped from the list, so the field can't be shrunk after the fact.
-- For the split to work, each thesis heading must start with its ID: `### T3 · Oil producers re-rate`.
+- One file per thesis is simplest to share later. A single `THESES.md` also works: it's split on headings that start with an ID (`### T3 · …`).
 
 **Public: `[publish.<slug>]`, `bin/publish.py`.** Pushes the chosen files to a public GitHub repo after every cycle, append-only, with stamped manifests. Nothing goes out if a file contains a secret from the env file, a token or key, a home path or the hostname. The push uses a deploy key for that one repo. One-time setup, by you: `bin/publish-setup.sh <owner>/<repo>`.
 
@@ -95,15 +97,38 @@ The keys (`ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` in the env file) never enter a ru
 
 By hand: `bin/broker.py <slug> --snapshot`, `--check` (validate `orders.json`, place nothing), `--execute`.
 
+## Topics that review security
+A topic listed under `[scanners.<slug>]` in `config.toml` reviews your repos and this machine. A review agent has to read code, which is what the sandbox exists to withhold, so it makes a trade: it can see the code but has no web tools, whatever `[agents]` says. Anything it reads, including instructions planted in it, has no way out.
+
+Every cycle, before the orchestrator runs, `bin/scanner.py` works outside the sandbox with no model involved. It copies each repo's tracked files to a read-only snapshot, withholding key files and redacting lines that look like secrets. It checks locked dependencies against [OSV](https://osv.dev) and checks the host (open ports, pending updates, firewall service, sshd settings, file modes). The results go in `SCAN.md`. The snapshot lives in the runner's state folder, so copies of your code never reach a synced vault. `SCAN.md` does: it says where weaknesses are, so treat the vault accordingly.
+
+The agent writes patches to `outputs/patches/<repo>--<what>.diff`. The runner dry-runs each one against the snapshot and reports the verdict in the digest. Nothing is ever applied: read the patch, then `git apply` it on a branch yourself.
+
+The topic argues for its own cadence with `Not before` in its pitch, using the history in `SCAN.md` as evidence. A new serious finding puts a `SCAN ALERT` in the orchestrator's facts, which overrides that date. `examples/security/CHARTER.md` is a worked example.
+
+**Wider scope, same reach.** The topic can cover more than this machine, but only through evidence brought to it. Its tools and mounts never grow, and the tools are a hard allow-list, so adding one to `[agents]` for other topics doesn't reach it. A scanning topic won't run outside the sandbox, and `SCAN.md` states its reach every cycle.
+- **Other computers push.** `bin/posture.sh` reads a machine's settings and writes a small report to `_inbox/machines/<name>.md`, carried by whatever syncs the folder. List the name under `machines`. The runner holds no key to that machine, so compromising it gains nothing on the others. Install a copy outside the synced folder: scheduling the synced file itself would let anything that writes to the folder run code there. Reports are read as data (known fields, plain values), and a missing or stale one shows as a coverage problem.
+- **Accounts are read by plain code.** With `github_user` set, the runner finds your public repos and scans them with no credentials. An optional read-only token adds private repos and GitHub's alerts. A classic token that can write is refused; a fine-grained token doesn't declare its permissions, so keep it read-only when you create it.
+- **The rest is a register.** Phones and accounts with no read-only route stay in the topic's `ASSETS.md`, marked as unobserved. The agent asks you about them and never logs in.
+
+This is a first line, not an audit. It can't see uncommitted work, git history, unlocked dependencies or firewall rules, and `SCAN.md` lists what it skipped. Redaction matches known patterns, so a secret in an unusual format can still reach the agent, though it can't leave.
+
+By hand: `bin/scanner.py <slug> --scan`, `--patches` (print verdicts).
+
 ## Layout
 
 ```
 bin/cycle.py               the runner
 bin/broker.py              paper-trading step for topics under [brokers] (keys stay outside the sandbox)
 bin/books.py               simulated books for topics under [books], priced from real market data
+bin/live.py                live books: one Alpaca paper account per book (mode = "alpaca")
+bin/accounts.py            plan and check those accounts; keeps the private register of what each holds
+bin/scanner.py             scan step for topics under [scanners] (redacted code snapshot, OSV, host and account checks)
+bin/posture.sh             read-only posture report, run on your other computers
 bin/seal.py                private, timestamped record for topics under [seal], with selective reveal
+bin/release.py             release engine changes from your instance to a public copy, checked against private.toml
 bin/publish.py             public, timestamped record for topics under [publish]; bin/publish-setup.sh sets it up
-tests/                     python3 tests/test_books.py, tests/test_broker.py, tests/test_publish.py
+tests/                     tests/test_books.py, tests/test_broker.py, tests/test_publish.py, tests/test_seal.py, tests/test_scanner.py, tests/test_scanner_scope.py, tests/test_release.py, tests/test_live.py, tests/test_accounts.py
 config.toml                hard limits: pool, tiers, models, schedule (from config.example.toml)
 deploy/                    systemd unit templates and env template, installed by setup.sh
 setup.sh                   checks prerequisites, writes the private env file, installs the timers
@@ -124,6 +149,7 @@ _orchestrator/
   USAGE.md                 written by the runner: actual turns and cost per run
   PROPOSALS.md             proposed new topics, awaiting your approval
   digests/                 one digest per cycle
+_inbox/machines/           posture reports pushed by other computers
 _template/                 copied to seed a new topic
   CHARTER.md  STATE.md  LOG.md  PITCH.md  outputs/
 topics/<slug>/             one isolated folder per topic
@@ -144,6 +170,7 @@ new-topic.sh               seeds a topic
 | `orders.json` (trading topics) | reads | reads | writes; placed and cleared by the runner |
 | `books/<ID>.json` (book topics) | reads | reads | writes |
 | `BOOKS.md` (book topics) | reads | reads | reads; written by the runner |
+| `SCAN.md` (security topics) | reads | reads | reads; written by the runner |
 
 ## Common actions
 - **Add a topic:** `./new-topic.sh <slug> "<Title>"`, fill in its CHARTER.md, set its priority in POLICY.md. The next cycle picks it up.

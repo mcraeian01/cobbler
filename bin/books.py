@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import broker  # noqa: E402  (Alpaca client and errors)
+import live  # noqa: E402  (real Alpaca paper account per book, for mode = "alpaca")
 
 ET = ZoneInfo("America/New_York")
 OPEN, CLOSE = dt.time(9, 30), dt.time(16, 0)
@@ -41,7 +42,8 @@ KINDS = {"stock", "etf", "option"}
 RULES = {"nav_below", "close_below", "close_above", "after"}
 OCC = re.compile(r"^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$")
 LIVE = ("pending", "live", "closing")
-DEFAULTS = dict(start_cash=1_000_000, max_books=20, max_new_per_week=3, max_single_stock=0.20,
+DEFAULTS = dict(mode="sim", start_cash=1_000_000, max_books=20, max_new_per_week=3, ramp_until=0, ramp_per_day=1,
+                max_single_stock=0.20,
                 max_option_each=0.20, max_options_total=0.50, max_long=1.0, max_short=0.50,
                 slippage_bps=5)
 
@@ -225,7 +227,65 @@ def check_spec(spec, stem: str, s: dict) -> str | None:
     return None
 
 
-def accept(cfg: dict, slug: str, now: dt.datetime | None = None) -> list[str]:
+def option_check(lookup, targets: list[dict], today: dt.date) -> tuple[str | None, list[str]]:
+    """(rejection, warnings) for a spec's option legs. lookup(sym) returns Alpaca's contract record,
+    or None if no such contract exists."""
+    warnings = []
+    for t in targets:
+        sym = str(t.get("symbol", "")).upper()
+        if t.get("kind") != "option":
+            continue
+        try:
+            c = lookup(sym)
+        except Exception as e:
+            warnings.append(f"{sym}: couldn't check the contract ({e})")
+            continue
+        if c is None:
+            return f"{sym}: no such option contract (check the expiry, strike and type)", warnings
+        oi = int(c.get("open_interest") or 0)
+        last = c.get("close_price_date")
+        stale = not last or (today - dt.date.fromisoformat(last)).days > 5
+        if oi < 500 or stale:
+            warnings.append(f"{sym} is thinly traded (open interest {oi}, last trade {last or 'never'}): it fills only "
+                            "on a day it trades and is dropped after 5 sessions without one. A liquid strike is safer")
+    return None, warnings
+
+
+def contract_lookup(s: dict):
+    api = broker.client(s)
+
+    def lookup(sym: str):
+        try:
+            return api._req("GET", f"{broker.PAPER}/v2/options/contracts/{sym}")
+        except broker.BrokerError as e:
+            if "404" in str(e) or "not found" in str(e).lower():
+                return None
+            raise
+    return lookup
+
+
+def pace(st: dict, s: dict, now: dt.datetime) -> tuple[str, int, int]:
+    """(phase, used, limit) for new books. Ramp: ramp_per_day per calendar day (ET) until ramp_until
+    books have been opened in total; then max_new_per_week in any 7 days."""
+    if s["ramp_until"] and len(st["created"]) < s["ramp_until"]:
+        today = now.astimezone(ET).date()
+        used = sum(1 for c in st["created"] if dt.datetime.fromisoformat(c).astimezone(ET).date() == today)
+        return "ramp", used, s["ramp_per_day"]
+    used = sum(1 for c in st["created"] if now - dt.datetime.fromisoformat(c) < dt.timedelta(days=7))
+    return "steady", used, s["max_new_per_week"]
+
+
+def pace_hold(st: dict, s: dict, now: dt.datetime) -> str | None:
+    phase, used, limit = pace(st, s, now)
+    if used < limit:
+        return None
+    if phase == "ramp":
+        return (f"{used} new book(s) today, the ramp allows {limit} a day until {s['ramp_until']} have opened "
+                f"({len(st['created'])} so far); it will open on the next day's run")
+    return f"{used} new books in the last 7 days, the limit is {limit}; it will open once the window allows"
+
+
+def accept(cfg: dict, slug: str, now: dt.datetime | None = None, lookup=None) -> list[str]:
     """Read books/*.json, queue valid new or changed books. Returns lines for the digest."""
     s = settings(cfg, slug)
     if not s:
@@ -256,8 +316,22 @@ def accept(cfg: dict, slug: str, now: dt.datetime | None = None) -> list[str]:
             continue
         h = spec_hash(spec)
         if b and b.get("spec_hash") == h:
-            verdicts[stem] = "unchanged"
+            verdicts[stem] = "unchanged" + (f"; warning: {'; '.join(b['warnings'])}" if b.get("warnings") else "")
             continue
+        warnings = []
+        if any(t.get("kind") == "option" for t in spec.get("targets") or []):
+            try:
+                lookup = lookup or contract_lookup(s)
+                err, warnings = option_check(lookup, spec.get("targets") or [], now.date())
+            except Exception as e:
+                err, warnings = None, [f"options weren't checked ({e})"]
+            if err:
+                verdicts[stem] = f"rejected: {err}"
+                if not b or b.get("last_rejection") != err:
+                    lines.append(f"{stem}: rejected: {err}")
+                if b:
+                    b["last_rejection"] = err
+                continue
         n = normalize(spec)
         day = now.date().isoformat()
         if b and b["status"] not in LIVE:
@@ -268,32 +342,51 @@ def accept(cfg: dict, slug: str, now: dt.datetime | None = None) -> list[str]:
                 verdicts[stem] = "ignored: a new book can't start closed"
                 continue
             active = sum(1 for x in st["books"].values() if x["status"] in LIVE)
-            recent = [c for c in st["created"] if now - dt.datetime.fromisoformat(c) < dt.timedelta(days=7)]
             if active >= s["max_books"]:
                 verdicts[stem] = f"held: {active} books are open, the limit is {s['max_books']}; close one first"
                 continue
-            if len(recent) >= s["max_new_per_week"]:
-                verdicts[stem] = (f"held: {len(recent)} new books in the last 7 days, the limit is "
-                                  f"{s['max_new_per_week']}; it will open once the window allows")
+            held = pace_hold(st, s, now)
+            if held:
+                verdicts[stem] = f"held: {held}"
                 continue
+            account = None
+            if s["mode"] == "alpaca":
+                accts = live.load_accounts(s)
+                account = live.free_account(st, accts)
+                if not account:
+                    verdicts[stem] = "held: no free Alpaca paper account; the owner needs to add one to the accounts file"
+                    lines.append(f"{stem}: waiting for a free Alpaca paper account")
+                    continue
             b = st["books"][stem] = {"thesis": n["thesis"], "status": "pending", "cash": float(s["start_cash"]),
                                      "positions": {}, "start": None, "trades": [], "history": [], "events": [],
                                      "pending": None, "last_eval": None, "created": now.isoformat()}
             st["created"].append(now.isoformat())
+            if account:
+                b["account"] = account
             why = "open"
         else:
             why = "close" if n["status"] == "close" else "rebalance"
-        b.update(spec=n, spec_hash=h, thesis=n["thesis"])
+        b.update(spec=n, spec_hash=h, thesis=n["thesis"], warnings=warnings)
         b.pop("last_rejection", None)
         if why == "close" and b["status"] == "pending" and not b["positions"]:
             b["status"], b["pending"] = "closed", None
             event(b, day, "closed before it opened", lines, stem)
             verdicts[stem] = "closed before it opened"
             continue
+        if b.get("account"):
+            accts = live.load_accounts(s)
+            try:
+                (live.open_book(b, accts, now, lines, stem, event) if why == "open"
+                 else live.change_book(b, accts, now, why, lines, stem, event))
+            except Exception as e:
+                event(b, day, f"orders couldn't be placed ({e}); they'll be retried next cycle", lines, stem)
+            verdicts[stem] = (f"accepted ({why}): orders placed on {b['account']}, filling at the next open"
+                              + (f"; warning: {'; '.join(warnings)}" if warnings else ""))
+            continue
         b["pending"] = {"targets": [] if why == "close" else n["targets"], "decided_at": now.isoformat(), "why": why}
         if why == "close":
             b["status"] = "closing"
-        verdicts[stem] = f"accepted ({why}): fills at the next market open"
+        verdicts[stem] = f"accepted ({why}): fills at the next market open" + (f"; warning: {'; '.join(warnings)}" if warnings else "")
         event(b, day, f"{why} queued for the next open", lines, stem)
     for bid, b in st["books"].items():
         if b["status"] in LIVE and bid not in seen_ids:
@@ -315,56 +408,69 @@ def nav_at(b: dict, day: str, bars: dict) -> float:
 
 
 def fill(b: dict, day: str, bars: dict, s: dict, lines: list[str], bid: str) -> bool:
-    """Trade the book to its pending targets at this session's open. False if a price is missing."""
+    """Trade the book towards its pending targets at this session's open, leg by leg.
+
+    Each leg fills at the open of the first session (after the change was written) in which it
+    traded. A buy leg with no trade for 5 sessions is dropped and its weight stays in cash; an exit
+    leg keeps waiting (a held position can't be abandoned; options settle at expiry anyway).
+    Returns True if anything traded."""
     pend = b["pending"]
-    targets = {t["symbol"]: t["weight"] for t in pend["targets"]}
-    syms = set(targets) | {k for k, q in b["positions"].items() if q}
-    px = {}
-    missing = []
-    for sym in syms:
-        bar = bars.get(sym, {}).get(day)
-        (missing.append(sym) if not bar else px.__setitem__(sym, bar["o"]))
-    if missing:
-        pend["waits"] = pend.get("waits", 0) + 1
-        if pend["waits"] >= 5:
-            event(b, day, f"{pend['why']} dropped: no trades in {', '.join(sorted(missing))} for 5 sessions", lines, bid)
-            b["pending"] = None
-            if b["status"] == "pending":
-                b["status"] = "rejected"
-            elif b["status"] == "closing":
-                b["status"] = "live"
-        return False
-    nav = b["cash"] + sum(q * px[k] * mult(k) for k, q in b["positions"].items())
-    slip = s["slippage_bps"] / 1e4
-    for sym in sorted(syms):
-        m = mult(sym)
-        want = targets.get(sym, 0.0) * nav / (px[sym] * m)
-        want = math.floor(want) if m == 100 else round(want, 4)
-        dq = want - b["positions"].get(sym, 0.0)
-        if abs(dq) < 1e-9:
-            continue
-        price = px[sym] * (1 + slip if dq > 0 else 1 - slip)
-        b["cash"] -= dq * price * m
-        b["trades"].append({"date": day, "symbol": sym, "qty": round(dq, 4), "price": round(price, 4), "why": pend["why"]})
-        if abs(want) < 1e-9:
-            b["positions"].pop(sym, None)
-        else:
-            b["positions"][sym] = want
-        if m == 100 and want == 0 and targets.get(sym, 0) > 0:
-            event(b, day, f"{sym}: target too small for one contract, so none bought", lines, bid)
-    if not b["start"]:
-        b["start"] = {"date": day, "nav": round(nav, 2), "spy": bars["SPY"][day]["o"]}
+    if "legs" not in pend:
+        targets = {t["symbol"]: t["weight"] for t in pend["targets"]}
+        held = {k for k, q in b["positions"].items() if q}
+        pend["legs"] = {sym: {"weight": targets.get(sym, 0.0), "waits": 0} for sym in sorted(set(targets) | held)}
+    legs = pend["legs"]
+    px = {sym: bars[sym][day]["o"] for sym in legs if bars.get(sym, {}).get(day)}
+    traded = False
+    if px:
+        def mark(k):
+            bar = bars.get(k, {}).get(day)
+            return bar["o"] if bar else (last_close(bars, k, day) or 0.0)
+        nav = b["cash"] + sum(q * mark(k) * mult(k) for k, q in b["positions"].items())
+        slip = s["slippage_bps"] / 1e4
+        for sym in sorted(px):
+            m, w = mult(sym), legs[sym]["weight"]
+            want = w * nav / (px[sym] * m)
+            want = math.floor(want) if m == 100 else round(want, 4)
+            dq = want - b["positions"].get(sym, 0.0)
+            del legs[sym]
+            if m == 100 and want == 0 and w > 0:
+                event(b, day, f"{sym}: target too small for one contract, so none bought", lines, bid)
+            if abs(dq) < 1e-9:
+                continue
+            price = px[sym] * (1 + slip if dq > 0 else 1 - slip)
+            b["cash"] -= dq * price * m
+            b["trades"].append({"date": day, "symbol": sym, "qty": round(dq, 4), "price": round(price, 4), "why": pend["why"]})
+            traded = True
+            if abs(want) < 1e-9:
+                b["positions"].pop(sym, None)
+            else:
+                b["positions"][sym] = want
+        if traded and not b["start"]:
+            b["start"] = {"date": day, "nav": round(nav, 2), "spy": bars["SPY"][day]["o"]}
+    for sym in list(legs):
+        legs[sym]["waits"] += 1
+        exiting = legs[sym]["weight"] == 0 or (b["positions"].get(sym, 0) and abs(legs[sym]["weight"]) < 1e-12)
+        if legs[sym]["waits"] >= 5 and not exiting and not b["positions"].get(sym):
+            del legs[sym]
+            event(b, day, f"{sym}: no trades in 5 sessions, so it was dropped; its weight stays in cash", lines, bid)
     why = pend["why"]
+    if b["status"] == "pending" and b["start"]:
+        b["status"] = "live"
+        event(b, day, f"opened at the open" + (f"; waiting for a trade in {', '.join(legs)}" if legs else ""), lines, bid)
+    elif traded and why == "rebalance":
+        event(b, day, "rebalanced at the open" + (f"; waiting for a trade in {', '.join(legs)}" if legs else ""), lines, bid)
+    if legs:
+        return traded
     b["pending"] = None
     if why == "close" or why.startswith("kill"):
         b["status"] = "closed" if why == "close" else "killed"
         b["end"] = {"date": day, "nav": round(b["cash"], 2)}
-        event(b, day, f"{'closed' if why == 'close' else 'sold out (' + why + ')'} at the open, "
-                      f"value ${b['cash']:,.0f}", lines, bid)
-    else:
-        b["status"] = "live"
-        event(b, day, f"{why} filled at the open", lines, bid)
-    return True
+        event(b, day, f"{'closed' if why == 'close' else 'sold out (' + why + ')'} at the open, value ${b['cash']:,.0f}", lines, bid)
+    elif b["status"] == "pending":
+        b["status"] = "rejected"
+        event(b, day, "nothing in the book traded within 5 sessions, so it never opened", lines, bid)
+    return traded
 
 
 def settle_expired(b: dict, day: str, bars: dict, lines: list[str], bid: str) -> None:
@@ -403,8 +509,9 @@ def update(cfg: dict, slug: str, market: Market | None = None, now: dt.datetime 
         return []
     st = load_state(cfg, slug)
     lines: list[str] = []
-    open_books = {k: b for k, b in st["books"].items() if b["status"] in LIVE}
-    if open_books:
+    open_books = {k: b for k, b in st["books"].items() if b["status"] in LIVE and not b.get("account")}
+    real_books = {k: b for k, b in st["books"].items() if b["status"] in LIVE and b.get("account")}
+    if open_books or real_books:
         now = now or now_et()
         today = now.date()
         syms = {"SPY"}
@@ -417,6 +524,8 @@ def update(cfg: dict, slug: str, market: Market | None = None, now: dt.datetime 
             syms |= {r["symbol"].upper() for r in b["spec"]["kill"] if r.get("symbol")}
             if b["last_eval"]:
                 starts.append(dt.date.fromisoformat(b["last_eval"]))
+        for b in real_books.values():
+            syms |= {r["symbol"].upper() for r in b["spec"]["kill"] if r.get("symbol")}
         syms |= {occ(x)[0] for x in list(syms) if OCC.match(x)}
         start = min(starts or [today]) - dt.timedelta(days=7)
         market = market or Market(broker.client(s))
@@ -445,6 +554,14 @@ def update(cfg: dict, slug: str, market: Market | None = None, now: dt.datetime 
                         b["status"] = "closing"
                         event(b, day, f"kill rule hit ({rule}); sells at the next open", lines, bid)
                 b["last_eval"] = day
+        if real_books:
+            accts = live.load_accounts(s)
+            last_session = sessions[-1] if sessions else None
+            for bid, b in real_books.items():
+                try:
+                    live.update_book(b, accts, bars, last_session, now, lines, bid, event)
+                except Exception as e:
+                    lines.append(f"{bid}: couldn't read its Alpaca account ({e})")
     save_state(cfg, slug, st)
     write_md(cfg, slug, st, s)
     return lines
@@ -457,6 +574,7 @@ def write_md(cfg: dict, slug: str, st: dict, s: dict) -> None:
         return f"{(a / b0 - 1) * 100:+.1f}%" if a and b0 else "-"
 
     rows, detail = [], []
+    acct_numbers = {k: v.get("number") for k, v in live.load_accounts(s).items()} if s.get("mode") == "alpaca" else {}
     for bid in sorted(st["books"]):
         b = st["books"][bid]
         last = b["history"][-1] if b["history"] else None
@@ -467,9 +585,13 @@ def write_md(cfg: dict, slug: str, st: dict, s: dict) -> None:
         spy = pct(spy_end, st0.get("spy"))
         vs = (f"{((nav / st0['nav']) - (spy_end / st0['spy'])) * 100:+.1f} pts"
               if nav and spy_end and st0.get("nav") else "-")
-        rows.append(f"| {bid} | {b['thesis']} | {b['status']} | {st0.get('date', '-')} | "
+        rows.append(f"| {bid} | {b['thesis']} | {b['status'] + ('' if b.get('account') else ' (simulated)')} | {st0.get('date', '-')} | "
                     f"{'$' + format(nav, ',.0f') if nav else '-'} | {ret} | {spy} | {vs} |")
         d = [f"## {bid} · {b['thesis']} · {b['status']}", ""]
+        if b.get("account"):
+            d.append(f"Held at Alpaca: paper account {b['account']}"
+                     + (f" ({acct_numbers.get(b['account'])})" if acct_numbers.get(b["account"]) else "")
+                     + ". Fills and value are Alpaca's records.")
         if b.get("spec"):
             d.append("Targets: " + ", ".join(f"{t['symbol']} {t['weight']:+.0%} ({t['kind']})" for t in b["spec"]["targets"]) or "none")
             d.append("Kill: " + "; ".join(f"{r['if']} {r.get('symbol', '')} {r['value']}".replace("  ", " ") for r in b["spec"]["kill"]))
@@ -488,12 +610,17 @@ def write_md(cfg: dict, slug: str, st: dict, s: dict) -> None:
 
     active = sum(1 for b in st["books"].values() if b["status"] in LIVE)
     now = now_et()
-    recent = [c for c in st["created"] if now - dt.datetime.fromisoformat(c) < dt.timedelta(days=7)]
+    phase, used, limit = pace(st, s, now)
+    if phase == "ramp":
+        pace_line = (f"Pace: ramping, {used} of {limit} new book(s) today; {len(st['created'])} of "
+                     f"{s['ramp_until']} opened so far, then {s['max_new_per_week']} a week.")
+    else:
+        pace_line = f"Pace: {used} of {limit} new books in the last 7 days."
     L = ["# Books", "",
          "Written by the runner from real market prices (Alpaca market data) every cycle and after each of your runs. "
          "Read-only: edits are overwritten. Change a book by editing `books/<ID>.json`.", "",
-         f"As of {now:%Y-%m-%d %H:%M %Z}. Open books: {active} of {s['max_books']}. "
-         f"New in the last 7 days: {len(recent)} of {s['max_new_per_week']}. Each book starts at ${s['start_cash']:,.0f}.", "",
+         f"As of {now:%Y-%m-%d %H:%M %Z}. Open books: {active} of {s['max_books']}. {pace_line} "
+         f"Each book starts at ${s['start_cash']:,.0f}.", "",
          "Rules: a change fills at the open of the first trading session after it was written, with "
          f"{s['slippage_bps']} bps slippage. Kill rules are checked on each session's close; a hit sells the "
          "book at the next open. Options settle at their intrinsic value after expiry. Dividends, splits and "

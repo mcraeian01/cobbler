@@ -18,6 +18,8 @@ One step, specific enough to check afterwards.
 
 ## Ask
 Tier: S
+Not before:
+<!-- optional: YYYY-MM-DD, if waking this topic sooner would be wasted -->
 Why this size:
 - Planning only.
 

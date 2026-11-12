@@ -71,15 +71,36 @@ ntfy_url = ""                # set NTFY_URL in the env file instead (keeps the t
 # priced from real market data; nothing is ordered anywhere, so any number can run. Uses the same
 # ALPACA_KEY_ID / ALPACA_SECRET_KEY (paper keys) for prices. Don't list a topic under both.
 # [books.investor]
+# mode = "sim"               # "sim": books simulated here at real prices. "alpaca": each book is its own Alpaca
+#                            # paper account, so the record is held by Alpaca (bin/live.py; accounts listed in
+#                            # ~/.config/agent-runner/alpaca-accounts.toml, one per book, never reused)
 # start_cash = 1000000       # every book starts at this value
 # max_books = 20             # open at once
 # max_new_per_week = 3       # new books in any 7 days
+# ramp_until = 0             # optional ramp: if set, allow ramp_per_day new books a day until this many
+# ramp_per_day = 1           # have opened in total, then max_new_per_week
 # max_single_stock = 0.20    # one company, as a fraction of a book (ETFs and baskets may go to 100%)
 # max_option_each = 0.20     # one option contract series (premium paid)
 # max_options_total = 0.50
 # max_long = 1.0             # no margin
 # max_short = 0.50
 # slippage_bps = 5
+
+# A topic that reviews code and this machine for security problems (bin/scanner.py). Every cycle
+# the runner refreshes a redacted read-only copy of each repo and the topic's SCAN.md, with no
+# model involved. The agent reads the copy at /work/code and gets no web tools, whatever
+# [agents] says. Repos are git checkouts; never list this instance itself, or the agent would
+# see other topics. Scan your clone of the template instead.
+# [scanners.security]
+# repos = ["~/code/my-project"]
+# host = true                  # listening ports, pending updates, firewall service, sshd settings
+# sensitive_paths = ["~/.config/agent-runner/env", "~/.aws/credentials", "~/.ssh/id_*"]  # mode only, never read
+# must_stay_on = ["ufw"]       # systemd units you've fixed: an alert fires if one regresses
+# must_stay_off = ["cups-browsed"]
+# machines = ["laptop"]        # other computers that push bin/posture.sh reports to _inbox/machines/
+# github_user = "you"          # public repos are found and scanned with no credentials. Optional:
+#                              # SCANNER_GITHUB_TOKEN in the env file, read-only, adds private repos
+#                              # and GitHub's alerts. A token that can write is refused.
 
 # Optional: seal a topic's record privately: fingerprint and OpenTimestamps-stamp its chosen files
 # every cycle, keep every version in _records/<topic>/, publish nothing. Reveal one book later with
@@ -93,3 +114,10 @@ ntfy_url = ""                # set NTFY_URL in the env file instead (keeps the t
 # [publish.investor]
 # repo = "<you>/investor-theses"
 # files = ["THESES.md", "BOOKS.md", "books/*.json"]   # relative to the topic folder; nothing else is published
+
+# Optional, for live books (mode = "alpaca"): how bin/accounts.py plans Alpaca paper accounts.
+# [accounts]
+# login_pattern = "you+{alias}@example.com"     # one Alpaca login per {alias}: the single-word name of its first account
+# per_login = 3                                  # Alpaca's limit of paper accounts per login
+# start_cash = 1000000
+# table = "_private/ACCOUNTS.md"                 # private register: account, login, book, thesis

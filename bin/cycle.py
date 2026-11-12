@@ -3,7 +3,7 @@
 
 One cycle:
   1. Run the orchestrator (claude -p) with read access to every topic. It returns
-     a JSON plan: which topics to wake, at what tier, with what wake message, plus a digest.
+     a JSON plan: which topics to wake, at what tier, with what wake message, plus the digest fields.
   2. Validate the plan against config.toml (tiers, max agents, weekly pool).
   3. Run each woken topic agent (claude -p) inside a sandbox that only sees its own
      folder and _global/, with a hard --max-turns ceiling.
@@ -36,8 +36,10 @@ CONFIG_PATH = Path(os.environ.get("AGENTS_CONFIG", HERE.parent / "config.toml"))
 sys.path.insert(0, str(HERE))
 import broker  # noqa: E402  (bin/broker.py: paper-trading step for topics listed under [brokers])
 import books  # noqa: E402  (bin/books.py: simulated books, one per thesis, for topics under [books])
+import scanner  # noqa: E402  (bin/scanner.py: scan step for topics listed under [scanners])
 import publish  # noqa: E402  (bin/publish.py: public, timestamped record for topics under [publish])
 import seal  # noqa: E402  (bin/seal.py: private, timestamped record for topics under [seal])
+import accounts  # noqa: E402  (bin/accounts.py: register of Alpaca paper accounts for live books)
 
 RUN_ENV = {"PATH", "LANG", "TERM", "TZ", "HOME", "CLAUDE_CODE_OAUTH_TOKEN"}
 
@@ -57,9 +59,13 @@ PLAN_SCHEMA = {
                 "required": ["topic", "tier", "reason", "message"],
             },
         },
-        "digest": {"type": "string"},
+        # The digest's parts, assembled by the runner once the agents have finished.
+        "proposals": {"type": "array", "items": {"type": "string"}},
+        "selection": {"type": "array", "items": {"type": "string"}},
+        "not_picked": {"type": "array", "items": {"type": "string"}},
+        "needs_you": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["wakes", "digest"],
+    "required": ["wakes", "proposals", "selection", "not_picked", "needs_you"],
 }
 
 
@@ -177,7 +183,7 @@ def facts_for_orchestrator(cfg: dict, runs: list[dict], mode: str) -> str:
             )
         else:
             lines.append(f"- {slug}: never woken")
-    return "\n".join(lines)
+    return "\n".join(lines + scanner.fact_lines(cfg))
 
 
 # ---------- running claude ----------
@@ -302,7 +308,8 @@ def orchestrate(cfg: dict, runs: list[dict], mode: str, dry: bool) -> dict:
         chdir_real=root, chdir_box="/work", schema=PLAN_SCHEMA, dry=dry,
     )
     if dry:
-        return {"wakes": [], "digest": "(dry run: orchestrator not called)"}
+        return {"wakes": [], "proposals": [], "selection": ["(dry run: orchestrator not called)"],
+                "not_picked": [], "needs_you": []}
     append_run(cfg, {"ts": now().isoformat(), "topic": "_orchestrator", "tier": "-",
                      "credits": cfg["budget"]["orchestrator_credits"],
                      "cap": cfg["runner"]["orchestrator_max_turns"],
@@ -327,6 +334,9 @@ def validate(cfg: dict, plan: dict, runs: list[dict],
             continue
         if tier not in tiers:
             notes.append(f"dropped {slug}: unknown tier '{tier}'")
+            continue
+        if scanner.scan_cfg(cfg, slug) and cfg["runner"]["isolation"] != "bwrap":
+            notes.append(f"dropped {slug}: a scanning topic only runs in the sandbox")
             continue
         if len(kept) >= cfg["budget"]["max_agents_per_cycle"]:
             notes.append(f"dropped {slug}: over max agents per cycle")
@@ -365,12 +375,18 @@ def wake(cfg: dict, w: dict, dry: bool) -> dict:
             broker.snapshot(cfg, slug)
         except Exception as e:
             broker_notes.append(f"snapshot failed: {e}")
+    scans = scanner.scan_cfg(cfg, slug) is not None
+    allowed, disallowed = cfg["agents"]["allowed_tools"], cfg["agents"]["disallowed_tools"]
+    binds_ro = [(root / "_global", "/work/_global")]
+    if scans:  # it reads the code, so it gets no web tools: nothing it reads can leave
+        allowed, disallowed = scanner.sealed_tools(cfg["agents"])
+        binds_ro.append((scanner.code_dir(cfg, slug), scanner.BOX_CODE))
     res = run_claude(
         cfg, name=f"topic-{slug}", prompt=prompt,
         model=cfg["models"]["agent"], max_turns=t["turns"] + buffer,
-        allowed=cfg["agents"]["allowed_tools"], disallowed=cfg["agents"]["disallowed_tools"],
+        allowed=allowed, disallowed=disallowed,
         binds_rw=[(root / "topics" / slug, "/work/topic")],
-        binds_ro=[(root / "_global", "/work/_global")],
+        binds_ro=binds_ro,
         chdir_real=root / "topics" / slug, chdir_box="/work/topic", schema=None, dry=dry,
     )
     out = outcome_of(res)
@@ -386,10 +402,16 @@ def wake(cfg: dict, w: dict, dry: bool) -> dict:
             broker.snapshot(cfg, slug)
         except Exception as e:
             broker_notes.append(f"execute failed, nothing placed: {e}")
+    scan_notes = []
+    if scans and not dry:  # a scan problem never fails the cycle
+        try:
+            scan_notes = scanner.after_run(cfg, slug, out)
+        except Exception as e:
+            scan_notes = [f"patch check failed: {e}"]
     rec = {"ts": now().isoformat(), "topic": slug, "tier": tier, "reason": w["reason"],
            "credits": t["credits"], "cap": t["turns"], "num_turns": res.get("num_turns"),
            "cost_usd": res.get("total_cost_usd"), "usage": res.get("usage"), "outcome": out,
-           "broker": broker_notes}
+           "broker": broker_notes, "scanner": scan_notes}
     if not dry:
         append_run(cfg, rec)
     if out in ("hit_ceiling", "timeout", "error", "bad_output") and not dry:
@@ -420,12 +442,68 @@ def write_usage_summary(cfg: dict, runs: list[dict]) -> None:
     (cfg["root"] / "_orchestrator" / "USAGE.md").write_text("\n".join(lines) + "\n")
 
 
+def pitch_bullets(text: str, heading: str, limit: int = 3, width: int = 150) -> list[str]:
+    """The top-level bullets under a `## heading` in a PITCH.md, shortened for a phone."""
+    m = re.search(rf"^## {re.escape(heading)}[^\n]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    items = [l[2:].replace("`", "").strip() for l in (m.group(1) if m else "").splitlines()
+             if l.startswith("- ") and l[2:].strip()]
+    short = [i if len(i) <= width else i[: width - 1].rstrip() + "…" for i in items]
+    return short[:limit] + ([f"…and {len(short) - limit} more"] if len(short) > limit else [])
+
+
+def progress(cfg: dict, results: list[dict]) -> list[str]:
+    """What each agent that ran says it did and wants next, read from its fresh pitch."""
+    out = []
+    for r in results:
+        out.append(f"{r['topic'].upper()} · {r['tier']} · {r.get('num_turns')}/{r.get('cap')} turns · "
+                   + ("✅" if r["outcome"] == "ok" else f"⚠️ {r['outcome']}"))
+        p = cfg["root"] / "topics" / r["topic"] / "PITCH.md"
+        text = p.read_text() if p.exists() else ""
+        if r["outcome"] != "ok":
+            out.append("The run didn't finish cleanly, so this pitch may be from an earlier run.")
+        out += ["Did:"] + [f"- {b}" for b in pitch_bullets(text, "Delivered last run") or ["nothing reported"]]
+        out += ["Next, if selected:"] + [f"- {b}" for b in pitch_bullets(text, "Next step") or ["nothing proposed"]]
+        out.append("")
+    return out[:-1] if out else ["No agents ran."]
+
+
+def build_digest(plan: dict, prog: list[str], credits: str, runner: list[str]) -> str:
+    def section(label, lines):
+        return [label, *lines, ""]
+
+    bullets = lambda key: [f"- {x}" for x in plan.get(key, [])]
+    needs = section("🙋 NEEDS YOU", bullets("needs_you")) if plan.get("needs_you") else []
+    urgent = any(x.upper().startswith("URGENT") for x in plan.get("needs_you", []))
+    picked = bullets("selection") or ["- Nobody this cycle."]
+    if plan.get("not_picked"):
+        picked += ["Not picked:"] + bullets("not_picked")
+    parts = (needs if urgent else []) + section("💡 PROPOSALS", bullets("proposals") or ["- None."]) \
+        + section("🎯 SELECTION", picked + [credits]) + section("🔨 PROGRESS", prog) \
+        + ([] if urgent else needs) + (section("⚙️ RUNNER", [f"- {n}" for n in runner]) if runner else [])
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def fit(body: str, limit: int = 3900) -> str:
+    """ntfy turns a message over 4,096 bytes into a file attachment, so stay under it."""
+    if len(body.encode()) <= limit:
+        return body
+    cut = body.encode()[:limit].decode(errors="ignore").rsplit("\n", 1)[0]
+    return cut + "\n…cut short. The full digest is in _orchestrator/digests/."
+
+
+def save_digest(cfg: dict, body: str) -> None:
+    """Append, so a morning and an evening cycle on the same day both survive."""
+    p = cfg["root"] / "_orchestrator" / "digests" / f"{now():%Y-%m-%d}.md"
+    with open(p, "a") as f:
+        f.write(("\n---\n\n" if p.exists() and p.stat().st_size else "") + f"{now():%H:%M}\n\n{body}")
+
+
 def notify(cfg: dict, title: str, body: str, dry: bool) -> None:
     url = cfg.get("notify", {}).get("ntfy_url") or os.environ.get("NTFY_URL")
     if dry or not url:
         print(f"\n--- {title} ---\n{body}")
         return
-    req = urllib.request.Request(url, data=body.encode(), headers={"Title": title, "Markdown": "yes"})
+    req = urllib.request.Request(url, data=fit(body).encode(), headers={"Title": title})
     token = os.environ.get("NTFY_TOKEN")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -462,10 +540,33 @@ def main() -> None:
     except BlockingIOError:
         sys.exit("another cycle is running")
 
+    scan_failures = []
+    if not a.dry_run:  # before the orchestrator, so it sees any alert; costs no model usage
+        for slug in cfg.get("scanners", {}):
+            if a.only in (None, slug):
+                try:
+                    scanner.scan(cfg, slug)
+                except Exception as e:
+                    scan_failures.append(f"{slug} scan failed, SCAN.md is stale: {e}")
+
     runs = read_runs(cfg)
     # Books move with the market every cycle, whether or not their topic is woken:
     # queued changes fill, kill rules are checked, BOOKS.md is refreshed before anyone reads it.
     book_notes = []
+    live_books = [k for k, b in cfg.get("books", {}).items() if b.get("mode") == "alpaca"]
+    if live_books and not a.dry_run:
+        # New keys pasted in since last cycle become usable, and a book waiting for an account
+        # gets one now, so its orders go in before the open.
+        try:
+            book_notes += [f"accounts: {line}" for line in accounts.check(cfg) if line != "no changes"]
+        except Exception as e:
+            book_notes.append(f"accounts check failed: {e}")
+        for slug in live_books:
+            try:
+                book_notes += [f"{slug} {line}" for line in books.accept(cfg, slug)
+                               if "waiting for a free Alpaca" not in line]
+            except Exception as e:
+                book_notes.append(f"{slug} books: accept failed: {e}")
     for slug in ([] if a.dry_run else cfg.get("books", {})):
         try:
             book_notes += [f"{slug} {line}" for line in books.update(cfg, slug)]
@@ -477,7 +578,8 @@ def main() -> None:
                            "message": f"WAKE · {a.only} · {now():%Y-%m-%d %H:%M}\n"
                                       f"Allocation: {a.tier} · manual run by {owner(cfg)}\n"
                                       "From owner: none\nContext: none"}],
-                "digest": f"Manual run of {a.only}."}
+                "proposals": [], "selection": [f"{a.only.upper()} · {a.tier}: manual run"],
+                "not_picked": [], "needs_you": []}
     else:
         try:
             plan = orchestrate(cfg, runs, a.mode, a.dry_run)
@@ -487,6 +589,7 @@ def main() -> None:
         runs = read_runs(cfg)
 
     wakes, notes = validate(cfg, plan, runs, cap)
+    notes += scan_failures
     results = []
     for w in wakes:
         rec = wake(cfg, w, a.dry_run)
@@ -501,6 +604,11 @@ def main() -> None:
             book_notes += [f"{slug} {line}" for line in publish.publish(cfg, slug)]
         except Exception as e:
             book_notes.append(f"{slug} publish failed: {e}")
+    if not a.dry_run and any(b.get("mode") == "alpaca" for b in cfg.get("books", {}).values()):
+        try:
+            accounts.table(cfg)   # the owner's register of accounts and what each holds
+        except Exception as e:
+            book_notes.append(f"accounts table failed: {e}")
     for slug in ([] if a.dry_run else cfg.get("seal", {})):
         try:
             book_notes += [f"{slug} {line}" for line in seal.seal(cfg, slug)]
@@ -510,13 +618,21 @@ def main() -> None:
     runs = read_runs(cfg)
     if not a.dry_run:
         write_usage_summary(cfg, runs)
-    footer = ["", "Runs this cycle:"] + [
-        f"- {r['topic']} {r['tier']}: {r['outcome']}, {r.get('num_turns')}/{r.get('cap')} turns"
-        for r in results] if results else ["", "No agents woken."]
-    footer += [f"- {r['topic']} broker: {line}" for r in results for line in r.get("broker", [])]
-    footer += [f"- {n}" for n in book_notes]
-    footer += [f"- note: {n}" for n in notes]
-    notify(cfg, f"Agents · {now():%a %d %b}", plan["digest"].strip() + "\n" + "\n".join(footer), a.dry_run)
+    runner = [f"{r['topic'].upper()}: {line}" for r in results for line in r.get("broker", [])]
+    runner += [re.sub(r"^\S+", lambda m: m.group().upper(), n) for n in book_notes]
+    runner += [f"{r['topic'].upper()}: {line}" for r in results for line in r.get("scanner", [])]
+    runner += notes
+    used = credits_used_this_week(cfg, runs)
+    credits = f"Credits: {used}/{cfg['budget']['weekly_credits']} used this week."
+    if live_books and not a.dry_run:
+        try:
+            plan["needs_you"] = list(plan.get("needs_you", [])) + accounts.needs(cfg)
+        except Exception as e:
+            runner.append(f"accounts: couldn't work out what's needed ({e})")
+    digest = build_digest(plan, progress(cfg, results), credits, runner)
+    if not a.dry_run:
+        save_digest(cfg, digest)
+    notify(cfg, f"Cobbler · {now():%a %d %b}", digest, a.dry_run)
     maybe_commit(cfg, f"cycle {now():%Y-%m-%d %H:%M} ({a.mode})", a.dry_run)
 
 

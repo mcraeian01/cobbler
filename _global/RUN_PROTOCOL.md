@@ -33,6 +33,7 @@ Rewrite `PITCH.md`. This is how the topic earns its next run.
 - Be honest about what was delivered. Claims are checked against the LOG and outputs, and overclaiming lowers future allocations.
 - Ask for the smallest tier that does the next step well.
 - Set status to `idle` if the next step needs the owner first, and `done` if the charter's "done means" is met.
+- If waking you sooner would be wasted, set `Not before: YYYY-MM-DD` under "Ask" and say why. Stay `active`: `idle` waits for the owner, `Not before` waits for a date.
 
 ## No messages to the owner
 Agents cannot message the owner. The orchestrator collates everything into one digest. If something is time-critical, put it first under "Needs owner" and start the line with URGENT; the orchestrator leads the digest with it.

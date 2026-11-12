@@ -52,6 +52,7 @@ def when(day, hh, mm=0):
 
 
 S = dict(books.DEFAULTS)
+LIQ = lambda sym: {"open_interest": 10000, "close_price_date": "2026-11-04"}   # a liquid, existing contract
 chk = lambda spec, stem="B001": books.check_spec({"id": stem, "thesis": "T1", "kill": [{"if": "after", "value": "2027-06-30"}], **spec}, stem, S)
 
 # ---- spec checks
@@ -84,7 +85,7 @@ sell = [t for t in b["trades"] if t["qty"] < 0][0]
 ok(kill_day == "2026-11-06" and sell["date"] == "2026-11-09", "the kill is seen at Friday's close and sold at Monday's open")
 ok(abs(b["end"]["nav"] - (b["cash"])) < 0.01 and not b["positions"], "a killed book is all cash")
 md = (tmp / "topics/inv/BOOKS.md").read_text()
-ok("| B001 | T1 | killed |" in md, "BOOKS.md lists the book and its status")
+ok("| B001 | T1 | killed (simulated) |" in md, "BOOKS.md lists the book, its status, and that it is simulated")
 shutil.rmtree(tmp)
 
 # ---- written before the open fills the same day; rebalance; short; close
@@ -131,14 +132,16 @@ tmp, cfg = setup()
 opt = "AAA261120C00100000"   # AAA call, strike 100, expires 2026-11-20
 write(tmp, "B005", targets=[{"symbol": opt, "kind": "option", "weight": 0.2}, {"symbol": "AAA", "kind": "etf", "weight": 0.5}],
       kill=[{"if": "after", "value": "2027-12-31"}])
-books.accept(cfg, "inv", now=when("2026-11-04", 20))
+books.accept(cfg, "inv", now=when("2026-11-04", 20), lookup=LIQ)
 days = ["2026-11-05", "2026-11-06", "2026-11-09", "2026-11-20", "2026-11-23"]
 data = {"SPY": {d: bar(500) for d in days},
         "AAA": {"2026-11-05": bar(100), "2026-11-06": bar(100), "2026-11-09": bar(100), "2026-11-20": bar(120, 130), "2026-11-23": bar(130)},
         opt: {"2026-11-06": bar(3.0, 3.0), "2026-11-09": bar(3.0)}}     # no option trade on 11-05
 books.update(cfg, "inv", market=FakeMarket(data), now=when("2026-11-23", 17))
 b = books.load_state(cfg, "inv")["books"]["B005"]
-ok(b["start"]["date"] == "2026-11-06", "waits for a session where the option actually traded")
+ok(b["start"]["date"] == "2026-11-05", "the ETF leg opens the book on the first session")
+opt_buy = [t for t in b["trades"] if t["symbol"] == opt and t["why"] != "expired"][0]
+ok(opt_buy["date"] == "2026-11-06", "the option leg fills at the open of the first session it traded")
 ok(sum(t["qty"] for t in b["trades"] if t["symbol"] == opt and t["why"] != "expired") == 666, "20% of $1M at $3.00 x 100 is 666 whole contracts")
 exp = [t for t in b["trades"] if t["why"] == "expired"]
 ok(exp and exp[0]["price"] == 30.0 and opt not in b["positions"], "after expiry it settles at intrinsic value: 130 - 100 = $30")
@@ -151,7 +154,7 @@ books.accept(cfg, "inv", now=when("2026-11-04", 20))
 days = ["2026-11-05", "2026-11-06", "2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12"]
 books.update(cfg, "inv", market=FakeMarket({"SPY": {d: bar(500) for d in days}}), now=when("2026-11-12", 17))
 b = books.load_state(cfg, "inv")["books"]["B006"]
-ok(b["status"] == "rejected" and any("no trades in ZZZZ" in e["text"] for e in b["events"]), "a never-traded symbol drops the book after 5 sessions")
+ok(b["status"] == "rejected" and any("ZZZZ: no trades in 5 sessions" in e["text"] for e in b["events"]), "a book whose only leg never trades is rejected after 5 sessions")
 shutil.rmtree(tmp)
 
 # ---- a run during market hours ignores today's still-forming bar
@@ -165,6 +168,76 @@ ok(b["status"] == "pending" and not b["history"], "mid-session: no fill and no k
 books.update(cfg, "inv", market=FakeMarket(data), now=when("2026-11-05", 17))
 b = books.load_state(cfg, "inv")["books"]["B007"]
 ok(b["start"]["date"] == "2026-11-05" and b["status"] == "closing", "after the close: fills at that open, then checks the close")
+shutil.rmtree(tmp)
+
+# ---- an illiquid leg doesn't hold the book back, and is dropped alone
+tmp, cfg = setup()
+dead = "AAA270617C00200000"
+write(tmp, "B008", targets=[{"symbol": "AAA", "kind": "etf", "weight": 0.8}, {"symbol": dead, "kind": "option", "weight": 0.1}],
+      kill=[{"if": "after", "value": "2027-12-31"}])
+books.accept(cfg, "inv", now=when("2026-11-04", 20), lookup=LIQ)
+days = ["2026-11-05", "2026-11-06", "2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12"]
+data = {"SPY": {d: bar(500) for d in days}, "AAA": {d: bar(100) for d in days}}
+books.update(cfg, "inv", market=FakeMarket(data), now=when("2026-11-05", 17))
+b = books.load_state(cfg, "inv")["books"]["B008"]
+ok(b["status"] == "live" and b["start"]["date"] == "2026-11-05" and "AAA" in b["positions"], "liquid legs open the book while the option waits")
+ok(b["pending"] and dead in b["pending"]["legs"], "the untraded option leg stays queued")
+books.update(cfg, "inv", market=FakeMarket(data), now=when("2026-11-12", 17))
+b = books.load_state(cfg, "inv")["books"]["B008"]
+ok(b["pending"] is None and dead not in b["positions"] and b["status"] == "live", "after 5 sessions the dead leg is dropped and the book carries on")
+ok(any(f"{dead}: no trades in 5 sessions" in e["text"] for e in b["events"]), "the drop is reported")
+shutil.rmtree(tmp)
+
+# ---- an exit from a thinly traded option is never dropped
+tmp, cfg = setup()
+thin = "AAA270617C00090000"
+write(tmp, "B009", targets=[{"symbol": "AAA", "kind": "etf", "weight": 0.5}, {"symbol": thin, "kind": "option", "weight": 0.1}],
+      kill=[{"if": "after", "value": "2027-12-31"}])
+books.accept(cfg, "inv", now=when("2026-11-04", 20), lookup=LIQ)
+days = ["2026-11-05", "2026-11-06", "2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-16"]
+data = {"SPY": {d: bar(500) for d in days}, "AAA": {d: bar(100) for d in days}, thin: {"2026-11-05": bar(20), "2026-11-16": bar(25)}}
+books.update(cfg, "inv", market=FakeMarket(data), now=when("2026-11-05", 17))
+write(tmp, "B009", status="close", targets=[], kill=[{"if": "after", "value": "2027-12-31"}])
+books.accept(cfg, "inv", now=when("2026-11-05", 20), lookup=LIQ)
+books.update(cfg, "inv", market=FakeMarket(data), now=when("2026-11-13", 17))
+b = books.load_state(cfg, "inv")["books"]["B009"]
+ok(b["status"] == "closing" and thin in b["positions"], "an exit leg in an untraded option keeps waiting past 5 sessions")
+books.update(cfg, "inv", market=FakeMarket(data), now=when("2026-11-16", 17))
+b = books.load_state(cfg, "inv")["books"]["B009"]
+ok(b["status"] == "closed" and not b["positions"], "and closes the book once it trades")
+shutil.rmtree(tmp)
+
+# ---- option contracts are checked when a spec arrives
+tmp, cfg = setup()
+write(tmp, "B010", targets=[{"symbol": "AAA", "kind": "etf", "weight": 0.5}, {"symbol": "AAA270617C00999000", "kind": "option", "weight": 0.1}])
+lines = books.accept(cfg, "inv", now=when("2026-11-06", 5), lookup=lambda sym: None)
+ok(any("no such option contract" in x for x in lines) and "B010" not in books.load_state(cfg, "inv")["books"], "a contract that doesn't exist is rejected before anything is queued")
+write(tmp, "B011", targets=[{"symbol": "AAA", "kind": "etf", "weight": 0.5}, {"symbol": "AAA280121C00094000", "kind": "option", "weight": 0.1}])
+books.accept(cfg, "inv", now=when("2026-11-06", 5), lookup=lambda sym: {"open_interest": 48, "close_price_date": "2026-10-22"})
+v = books.load_state(cfg, "inv")["verdicts"]["B011"]
+ok(v.startswith("accepted") and "thinly traded" in v and "open interest 48" in v, "a thin contract is accepted with a warning the agent can see")
+ok("thinly traded" in (tmp / "topics/inv/BOOKS.md").read_text(), "the warning is in BOOKS.md")
+shutil.rmtree(tmp)
+
+# ---- ramp: 1 a day until ramp_until books, then the weekly limit
+tmp, cfg = setup(ramp_until=3, ramp_per_day=1, max_new_per_week=1)
+for i in range(1, 6):
+    write(tmp, f"B10{i}")
+books.accept(cfg, "inv", now=when("2026-11-10", 5))
+v = books.load_state(cfg, "inv")["verdicts"]
+ok(v["B101"].startswith("accepted") and v["B102"].startswith("held") and "a day" in v["B102"], "ramp: one new book per day")
+books.accept(cfg, "inv", now=when("2026-11-10", 20))
+ok(books.load_state(cfg, "inv")["verdicts"]["B102"].startswith("held"), "ramp: still only one that same evening")
+books.accept(cfg, "inv", now=when("2026-11-11", 5))
+books.accept(cfg, "inv", now=when("2026-11-12", 5))
+st = books.load_state(cfg, "inv")
+ok(len(st["created"]) == 3 and st["verdicts"]["B104"].startswith("held"), "ramp: one each day until 3 have opened")
+books.accept(cfg, "inv", now=when("2026-11-13", 5))
+v = books.load_state(cfg, "inv")["verdicts"]["B104"]
+ok(v.startswith("held") and "7 days" in v, "after the ramp, the weekly limit applies")
+books.accept(cfg, "inv", now=when("2026-11-20", 5))
+ok(books.load_state(cfg, "inv")["verdicts"]["B104"].startswith("accepted"), "and the next opens a week after the last")
+ok("Pace:" in (tmp / "topics/inv/BOOKS.md").read_text(), "BOOKS.md shows the pace")
 shutil.rmtree(tmp)
 
 print(f"\n{'All passed' if not FAILS else str(len(FAILS)) + ' failed'}")

@@ -18,7 +18,7 @@ For each topic woken last cycle, compare the ledger's grant with its latest LOG 
 - Record the result in `LEDGER.md` as delivered, partial, missed or overran.
 
 ## 3. Score and allocate
-1. Skip topics with priority 0, pitches marked `idle` or `done`, and topics woken last cycle that have not yet logged a run.
+1. Skip topics with priority 0, pitches marked `idle` or `done`, and topics woken last cycle that have not yet logged a run. Also skip a pitch whose `Not before` date is still ahead, even when credits would otherwise expire, unless the runner facts show a `SCAN ALERT` for that topic or the owner has notes or feedback waiting for it.
 2. Score each remaining pitch with the weights in `POLICY.md`. Show the arithmetic in the ledger.
 3. Apply fairness rules first, then grant in score order until the runner's agent spend cap or the max-agents limit is hit. In a `weekly` cycle the cap is everything that would otherwise expire at the reset, so spend it.
 4. A grant can be smaller than the ask.
@@ -33,21 +33,12 @@ The agent wakes into its own state plus this message, and nothing else. Keep it 
 Only if `POLICY.md` allows a proposal this cycle. Look across all states for a gap: a recurring "Needs owner" theme, two topics blocked on the same missing thing, or a stated goal no topic owns. Write at most one proposal to `PROPOSALS.md` with: name, goal, why now, evidence (which topics), what it would displace, suggested tier and priority.
 
 ## 6. Digest for the owner
-Write `_orchestrator/digests/YYYY-MM-DD.md` and put the same text in the plan's `digest`. The runner sends it and appends each run's outcome. Keep it to one phone screen. Any `URGENT` line from a topic's "Needs owner" goes first.
+Fill the plan's digest fields. After the agents finish, the runner assembles them with a Progress section built from each agent's fresh pitch, saves the result to `_orchestrator/digests/` and sends it to the owner's phone. Don't write a digest file yourself. Plain text only: phones show Markdown as typed. Write topic names in capitals (INVESTOR, SECURITY). Each item is one short line.
 
-```
-Completed since last cycle
-- <topic>: <what moved> (<output file>)
-Needs you
-- <topic>: <decision>, blocking <what>
-Woken now
-- <topic> · <tier> · <selected|starved>
-Not funded
-- <topic>: <one-line reason>
-Proposal (if any)
-- <name>: <one line>. Reply to approve.
-Credits: <spent>/<pool> this week
-```
+- `proposals`: `<name>: <one line>. Reply to approve.` Empty if there are none.
+- `selection`: one per wake: `<TOPIC> · <tier> · <credits> credits: <why, in under 15 words>`. Say so if the grant is smaller than the ask.
+- `not_picked`: `<TOPIC>: <why, in under 15 words>`, for each active topic not woken.
+- `needs_you`: `<TOPIC>: <decision>, blocking <what>`. Any `URGENT` line from a topic's "Needs owner" goes first, starting with URGENT, and the runner then leads the digest with this section.
 
 Feedback on unfunded pitches goes in the digest only. Agents never see it unless the owner adds it to `FEEDBACK.md`.
 
